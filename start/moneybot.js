@@ -16,10 +16,10 @@ limitations under the License.
 
 A simplified Slack bot for reporting stocks information.
 */
-
 var https = require('https');
 var Botkit = require('botkit')
 var fs = require('fs') // NEW: Add this require (for loading from files).
+var PriceDictionary = {};
 
 var controller = Botkit.slackbot({debug: false})
 
@@ -29,9 +29,10 @@ if (!process.env.slack_token_path) {
     process.exit(1)
 }
 
+
 fs.readFile(process.env.slack_token_path, function (err, data) {
     if (err) {
-        console.log('Error: Specify token in slack_token_path file')
+        console.log('Error: Specify token in slack_token_path file');
         process.exit(1)
     }
 
@@ -50,8 +51,21 @@ fs.readFile(process.env.slack_token_path, function (err, data) {
 controller.hears(
     [''], ['direct_message', 'direct_mention', 'mention'],
     function (bot, message) {
-    // create stock url from message
-    var finUrl = "https://finance.google.com/finance/info?client=ig&q=" + message.text
+    // validate data
+    var tickers = message.text.split(" ");
+    for (i = 0; i < tickers.length; i++) {
+        track(bot, message, tickers[i]);
+    }
+})
+
+function track(bot, message, tickerSymbol) {
+    // handling for ticker requests starting with $
+    if (tickerSymbol.startsWith("$")) {
+        tickerSymbol = tickerSymbol.substring(1, tickerSymbol.length);
+    }
+
+        // create stock url from message
+    var finUrl = "https://finance.google.com/finance/info?client=ig&q=" + tickerSymbol
     
     https.get(finUrl, function (res) {
         res.setEncoding('binary');
@@ -63,33 +77,76 @@ controller.hears(
         
         res.on('end', function () {
             var preResult = resData.substring(3, resData.length - 1); // Google finance data starts with "//"
-            var result = JSON.parse(preResult);
-            var json = result[0];
+            try {
+                var result = JSON.parse(preResult);
+                var json = result[0];
+                var url = "http://finance.yahoo.com/quote/" + tickerSymbol;
             
-            var url = "http://finance.yahoo.com/quote/" + message.text;
-            //console.log(url);
+                //var mf = MessageFormatter(json, url);
+                var summary = FormatMessage(json, url);
             
-            //var mf = MessageFormatter(json, url);
-            var summary = FormatMessage(json, url);
-            
-            //var lastTradeDate = Date.parse( json["lt_dts"]) / 1000;
+                //var lastTradeDate = Date.parse( json["lt_dts"]) / 1000;
 
-            bot.reply(message, summary);
+                bot.reply(message, summary);
+            }
+            catch(err) {
+                bot.reply(message, ErrorMessage("Invalid ticker symbol: " + tickerSymbol));
+            }
         })
-
-        //this doesn't work right now
+        
         res.on('error', function(err){
-           // handle errors here
-           bot.reply(message, ErrorMessage(err));
+            bot.reply(message, ErrorMessage(err));
         });
     })
-})
-
+}
 
 //helper functions
+function ComparePrevious(ticker, newValue){
+    var jsonText;
+    ticker = ticker.toUpperCase();
+    if(PriceDictionary[ticker]){
+        var previousValue = PriceDictionary[ticker];
+        var difference = Number(newValue) - previousValue;
+        difference = difference.toPrecision(4);
+        var percentChange = difference / previousValue;
+        percentChange = (percentChange*100).toPrecision(4);
+        
+        if(difference > 0){
+            jsonText = "$" + newValue + ", " + difference + " (+" + percentChange + "%) since last request"; 
+        }else if(difference < 0){
+            jsonText = "$" + newValue + ", " + difference + " (" + percentChange + "%) since last request"; 
+        }else{
+            jsonText = "$" + newValue + ", " + difference + " (" + percentChange + "%) since last request"; 
+        }
+    }
+    PriceDictionary[ticker] = Number(newValue);
+    return jsonText;
+}
 function ErrorMessage(err){
     //we can extend this later
-    return "NOUUUUUUUU\n:party_parrot:";
+    return "An error occured: " + err;
+}
+
+//TODO
+function GetColor(change){
+    var color, percentageSign;
+    //green color for positive
+    const positive = "#32CD32";
+    //red color for negative
+    const negative = "#FF0000";
+    //light gray color for no change
+    const noChange = "#E8E8E8";
+    if(Number(change) > 0){
+        color = positive;
+        percentageSign = "+";
+    }else if(Number(change) < 0){
+        color = negative;
+        percentageSign = "";
+    }else{
+        color = noChange;
+        percentageSign = "";
+    }
+    return null;
 }
 
 function FormatMessage(jsonResult, url){
@@ -104,40 +161,59 @@ function FormatMessage(jsonResult, url){
     var afterChange = jsonResult["ec"];
     var afterChangePercent = jsonResult["ecp"];
     
-    const green = "#32CD32";
-    const red = "#FF0000";
-    const lightgray = "#E8E8E8";
+    //green color for positive
+    const positive = "#32CD32";
+    //red color for negative
+    const negative = "#FF0000";
+    //light gray color for no change
+    const noChange = "#E8E8E8";
     var todayColor, afterColor;
-    
+    var percentageSign, afterPercentageSign;
+
     if(Number(change) > 0){
-        todayColor = green;
+        todayColor = positive;
+        percentageSign = "+";
     }else if(Number(change) < 0){
-        todayColor = red;
+        todayColor = negative;
+        percentageSign = "";
     }else{
-        todayColor = lightgray;
+        todayColor = noChange;
+        percentageSign = "";
     }
     
     if(Number(afterChange) > 0){
-        afterColor = green;
+        afterColor = positive;
+        afterPercentageSign = "+";
     }else if(Number(afterChange) < 0){
-        afterColor = red;
+        afterColor = negative;
+        afterPercentageSign = "";
     }else{
-        afterColor = lightgray;
+        afterColor = noChange;
+        afterPercentageSign = "";
+    }
+
+    var previousJSONText = ComparePrevious(tickerSymbol, last);
+    if(previousJSONText){
+        var previousJSON = {
+            "title":"Change since last request",
+            "text": previousJSONText,
+            "color":"",
+            "mrkdwn_in": ["text"]
+        }
     }
     
     var daySummary = "Prev Close: *$" + previousClose + "*"
                                 + "\nLast: *$" + last + "*"
                                 + " Time: `" + lastTime + "`"
-                                + "\nChange: *" + change + "*"
-                                + " Change(%): *" + changePercent + "*";
+                                + "\nChange: *" + change + " (" + percentageSign + changePercent +"%)*";
     var afterSummary = "Last: *$" + afterLast + "*"
                                 + " Time: `" + afterLastTime + "`"
-                                + "\nChange: *" + afterChange + "*"
-                                + " Change(%): *" + afterChangePercent + "*";
+                                + "\nChange: *" + afterChange + " (" + afterPercentageSign + afterChangePercent + "%)*";
 
-    var jsin = {
-        "text": tickerSymbol + ": " + url,
+    var json = {
+        "text": "*" + tickerSymbol + "*: " + url,
         "attachments": [
+            previousJSON,
             {
                 "title": "Day Hours",
                 "text": daySummary,
@@ -153,7 +229,7 @@ function FormatMessage(jsonResult, url){
         ]
     };
 
-    return jsin;
+    return json;
 };
 //helper class 
 //michael: I'd like to revisit this later
